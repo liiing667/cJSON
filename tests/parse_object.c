@@ -52,7 +52,7 @@ static void assert_is_child(cJSON *child_item, const char *name, int type)
 
 static void assert_not_object(const char *json)
 {
-    parse_buffer parsebuffer = { 0, 0, 0, 0, { 0, 0, 0 } };
+    parse_buffer parsebuffer = { 0, 0, 0, 0, { 0, 0, 0 }, 0, 0, 0 };
     parsebuffer.content = (const unsigned char*)json;
     parsebuffer.length = strlen(json) + sizeof("");
     parsebuffer.hooks = global_hooks;
@@ -64,7 +64,7 @@ static void assert_not_object(const char *json)
 
 static void assert_parse_object(const char *json)
 {
-    parse_buffer parsebuffer = { 0, 0, 0, 0, { 0, 0, 0 } };
+    parse_buffer parsebuffer = { 0, 0, 0, 0, { 0, 0, 0 }, 0, 0, 0 };
     parsebuffer.content = (const unsigned char*)json;
     parsebuffer.length = strlen(json) + sizeof("");
     parsebuffer.hooks = global_hooks;
@@ -162,6 +162,88 @@ static void parse_object_should_not_parse_non_objects(void)
     assert_not_object("\"{}hello world!\n\"");
 }
 
+static void parse_object_should_reject_duplicate_keys_in_strict_mode(void)
+{
+    cJSON_ParseOptions options = { 0, 0, true, false };
+    const char *duplicate_json = "{\"role\":\"user\",\"role\":\"admin\"}";
+    cJSON *parsed = NULL;
+
+    /* the default parser keeps both members and stays unchanged */
+    parsed = cJSON_Parse(duplicate_json);
+    TEST_ASSERT_NOT_NULL(parsed);
+    TEST_ASSERT_EQUAL_STRING("user", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(parsed, "role")));
+    cJSON_Delete(parsed);
+
+    /* strict mode rejects duplicate keys at the top level */
+    TEST_ASSERT_NULL(cJSON_ParseStrict(duplicate_json, &options));
+
+    /* ... and at any nesting depth */
+    TEST_ASSERT_NULL(cJSON_ParseStrict("{\"outer\":{\"role\":\"user\",\"role\":\"admin\"}}", &options));
+    TEST_ASSERT_NULL(cJSON_ParseStrict("[{\"a\":1,\"a\":2}]", &options));
+
+    /* the same key in different objects is not a duplicate */
+    parsed = cJSON_ParseStrict("{\"a\":{\"role\":\"user\"},\"b\":{\"role\":\"admin\"}}", &options);
+    TEST_ASSERT_NOT_NULL(parsed);
+    cJSON_Delete(parsed);
+
+    /* distinct keys still parse fine */
+    parsed = cJSON_ParseStrict("{\"role\":\"user\",\"id\":7}", &options);
+    TEST_ASSERT_NOT_NULL(parsed);
+    cJSON_Delete(parsed);
+}
+
+static void parse_object_should_enforce_budgets_in_strict_mode(void)
+{
+    cJSON_ParseOptions options = { 0, 0, false, false };
+    const char *json = "{\"a\":{\"b\":{\"c\":{}}}}";
+    cJSON *parsed = NULL;
+
+    /* byte budget: input longer than max_bytes is rejected */
+    options.max_bytes = strlen(json) - 1;
+    TEST_ASSERT_NULL(cJSON_ParseStrict(json, &options));
+    options.max_bytes = strlen(json);
+    parsed = cJSON_ParseStrict(json, &options);
+    TEST_ASSERT_NOT_NULL(parsed);
+    cJSON_Delete(parsed);
+
+    /* nesting budget: deeper than max_depth is rejected */
+    options.max_bytes = 0;
+    options.max_depth = 3;
+    TEST_ASSERT_NULL(cJSON_ParseStrict(json, &options));
+    options.max_depth = 4;
+    parsed = cJSON_ParseStrict(json, &options);
+    TEST_ASSERT_NOT_NULL(parsed);
+    cJSON_Delete(parsed);
+
+    /* the default parser still accepts input deeper than any custom budget */
+    options.max_depth = 1;
+    TEST_ASSERT_NULL(cJSON_ParseStrict(json, &options));
+    parsed = cJSON_Parse(json);
+    TEST_ASSERT_NOT_NULL(parsed);
+    cJSON_Delete(parsed);
+}
+
+static void parse_object_should_reject_nonfinite_numbers_in_strict_mode(void)
+{
+    cJSON_ParseOptions options = { 0, 0, false, true };
+    cJSON *parsed = NULL;
+
+    /* the default parser saturates overflowing numbers and stays unchanged */
+    parsed = cJSON_Parse("{\"big\":1e999}");
+    TEST_ASSERT_NOT_NULL(parsed);
+    cJSON_Delete(parsed);
+
+    /* strict mode rejects overflowing numbers, at any depth */
+    TEST_ASSERT_NULL(cJSON_ParseStrict("{\"big\":1e999}", &options));
+    TEST_ASSERT_NULL(cJSON_ParseStrict("{\"big\":-1e999}", &options));
+    TEST_ASSERT_NULL(cJSON_ParseStrict("{\"outer\":{\"big\":1e999}}", &options));
+
+    /* finite numbers, including large ones, still parse fine */
+    parsed = cJSON_ParseStrict("{\"big\":1e300,\"small\":-2.5}", &options);
+    TEST_ASSERT_NOT_NULL(parsed);
+    cJSON_Delete(parsed);
+}
+
 int CJSON_CDECL main(void)
 {
     /* initialize cJSON item */
@@ -172,5 +254,8 @@ int CJSON_CDECL main(void)
     RUN_TEST(parse_object_should_not_parse_non_objects);
     RUN_TEST(parse_object_should_parse_objects_with_multiple_elements);
     RUN_TEST(parse_object_should_parse_objects_with_one_element);
+    RUN_TEST(parse_object_should_reject_duplicate_keys_in_strict_mode);
+    RUN_TEST(parse_object_should_enforce_budgets_in_strict_mode);
+    RUN_TEST(parse_object_should_reject_nonfinite_numbers_in_strict_mode);
     return UNITY_END();
 }

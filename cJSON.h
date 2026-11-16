@@ -158,6 +158,25 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLength(const char *value, size_t buffer_len
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithOpts(const char *value, const char **return_parse_end, cJSON_bool require_null_terminated);
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer_length, const char **return_parse_end, cJSON_bool require_null_terminated);
 
+/* Strict parsing configuration for cJSON_ParseStrict. Every check is opt-in:
+ * a zero/false field disables the corresponding restriction. */
+typedef struct cJSON_ParseOptions
+{
+    /* reject input longer than this many bytes (0 = unlimited) */
+    size_t max_bytes;
+    /* reject nesting deeper than this many arrays/objects (0 = CJSON_NESTING_LIMIT) */
+    size_t max_depth;
+    /* reject objects that contain duplicate keys, at any nesting depth */
+    cJSON_bool reject_duplicate_keys;
+    /* reject numbers that overflow or are otherwise not finite */
+    cJSON_bool reject_nonfinite_numbers;
+} cJSON_ParseOptions;
+
+/* Parse JSON with strict limits. Unlike cJSON_Parse, duplicate object keys,
+ * inputs exceeding the given byte/nesting budgets and non-finite numbers
+ * are rejected. The whole input must be consumed (null terminated). */
+CJSON_PUBLIC(cJSON *) cJSON_ParseStrict(const char *value, const cJSON_ParseOptions * const options);
+
 /* Render a cJSON entity to text for transfer/storage. */
 CJSON_PUBLIC(char *) cJSON_Print(const cJSON *item);
 /* Render a cJSON entity to text for transfer/storage without any formatting. */

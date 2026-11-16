@@ -293,7 +293,17 @@ typedef struct
     size_t offset;
     size_t depth; /* How deeply nested (in arrays/objects) is the input at the current offset. */
     internal_hooks hooks;
+    /* strict parsing configuration, all zero/false means lenient (cJSON_Parse behavior) */
+    size_t max_depth; /* 0 = use CJSON_NESTING_LIMIT */
+    cJSON_bool reject_duplicate_keys;
+    cJSON_bool reject_nonfinite_numbers;
 } parse_buffer;
+
+/* the nesting limit in effect for a parse buffer */
+static size_t parse_depth_limit(const parse_buffer * const buffer)
+{
+    return (buffer->max_depth != 0) ? buffer->max_depth : CJSON_NESTING_LIMIT;
+}
 
 /* check if the given size is left to read in a given parse buffer (starting with 1) */
 #define can_read(buffer, size) ((buffer != NULL) && (((buffer)->offset + size) <= (buffer)->length))
@@ -381,6 +391,13 @@ loop_end:
         /* free the temporary buffer */
         input_buffer->hooks.deallocate(number_c_string);
         return false; /* parse_error */
+    }
+
+    if (input_buffer->reject_nonfinite_numbers && (isinf(number) || isnan(number)))
+    {
+        /* free the temporary buffer */
+        input_buffer->hooks.deallocate(number_c_string);
+        return false; /* number overflowed or is not finite */
     }
 
     item->valuedouble = number;
@@ -1085,6 +1102,7 @@ static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buf
 static cJSON_bool print_array(const cJSON * const item, printbuffer * const output_buffer);
 static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_buffer);
 static cJSON_bool print_object(const cJSON * const item, printbuffer * const output_buffer);
+static cJSON *parse_json_with_options(const char *value, size_t buffer_length, const char **return_parse_end, cJSON_bool require_null_terminated, const cJSON_ParseOptions * const options);
 
 /* Utility to jump whitespace and cr/lf */
 static parse_buffer *buffer_skip_whitespace(parse_buffer * const buffer)
@@ -1146,7 +1164,36 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithOpts(const char *value, const char **return
 /* Parse an object - create a new root, and populate. */
 CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer_length, const char **return_parse_end, cJSON_bool require_null_terminated)
 {
-    parse_buffer buffer = { 0, 0, 0, 0, { 0, 0, 0 } };
+    return parse_json_with_options(value, buffer_length, return_parse_end, require_null_terminated, NULL);
+}
+
+/* Parse JSON with strict limits: reject duplicate keys, inputs exceeding the
+ * byte/nesting budgets and non-finite numbers, depending on the options. */
+CJSON_PUBLIC(cJSON *) cJSON_ParseStrict(const char *value, const cJSON_ParseOptions * const options)
+{
+    size_t buffer_length = 0;
+
+    if (NULL == value)
+    {
+        return NULL;
+    }
+
+    buffer_length = strlen(value);
+    if ((options != NULL) && (options->max_bytes != 0) && (buffer_length > options->max_bytes))
+    {
+        /* input exceeds the caller's byte budget */
+        global_error.json = (const unsigned char*)value;
+        global_error.position = 0;
+        return NULL;
+    }
+
+    /* Adding null character size to require the whole input to be consumed. */
+    return parse_json_with_options(value, buffer_length + sizeof(""), NULL, true, options);
+}
+
+static cJSON *parse_json_with_options(const char *value, size_t buffer_length, const char **return_parse_end, cJSON_bool require_null_terminated, const cJSON_ParseOptions * const options)
+{
+    parse_buffer buffer = { 0, 0, 0, 0, { 0, 0, 0 }, 0, 0, 0 };
     cJSON *item = NULL;
 
     /* reset error position */
@@ -1162,6 +1209,12 @@ CJSON_PUBLIC(cJSON *) cJSON_ParseWithLengthOpts(const char *value, size_t buffer
     buffer.length = buffer_length;
     buffer.offset = 0;
     buffer.hooks = global_hooks;
+    if (options != NULL)
+    {
+        buffer.max_depth = options->max_depth;
+        buffer.reject_duplicate_keys = options->reject_duplicate_keys;
+        buffer.reject_nonfinite_numbers = options->reject_nonfinite_numbers;
+    }
 
     item = cJSON_New_Item(&global_hooks);
     if (item == NULL) /* memory fail */
@@ -1499,7 +1552,7 @@ static cJSON_bool parse_array(cJSON * const item, parse_buffer * const input_buf
     cJSON *head = NULL; /* head of the linked list */
     cJSON *current_item = NULL;
 
-    if (input_buffer->depth >= CJSON_NESTING_LIMIT)
+    if (input_buffer->depth >= parse_depth_limit(input_buffer))
     {
         return false; /* to deeply nested */
     }
@@ -1664,7 +1717,7 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
     cJSON *head = NULL; /* linked list head */
     cJSON *current_item = NULL;
 
-    if (input_buffer->depth >= CJSON_NESTING_LIMIT)
+    if (input_buffer->depth >= parse_depth_limit(input_buffer))
     {
         return false; /* to deeply nested */
     }
@@ -1732,6 +1785,22 @@ static cJSON_bool parse_object(cJSON * const item, parse_buffer * const input_bu
         /* swap valuestring and string, because we parsed the name */
         current_item->string = current_item->valuestring;
         current_item->valuestring = NULL;
+
+        if (input_buffer->reject_duplicate_keys)
+        {
+            /* reject this object if a previous member already has this name */
+            cJSON *existing_item = head;
+            while (existing_item != current_item)
+            {
+                if ((existing_item->string != NULL)
+                        && (current_item->string != NULL)
+                        && (strcmp(existing_item->string, current_item->string) == 0))
+                {
+                    goto fail; /* duplicate key */
+                }
+                existing_item = existing_item->next;
+            }
+        }
 
         if (cannot_access_at_index(input_buffer, 0) || (buffer_at_offset(input_buffer)[0] != ':'))
         {
